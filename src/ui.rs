@@ -182,7 +182,7 @@ pub fn draw_popup_card(
         drag_rect.expand2(egui::vec2(8.0, 6.0)),
         ui.id().with("drag_handle"),
         Sense::click_and_drag(),
-    );
+    ).on_hover_text("Drag to move");
     if drag_response.drag_started() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
@@ -195,7 +195,7 @@ pub fn draw_popup_card(
 
     let close_center = egui::pos2(rect.right() - 22.0, header_y);
     let close_rect = egui::Rect::from_center_size(close_center, egui::vec2(24.0, 24.0));
-    let close_response = ui.interact(close_rect, ui.id().with("close_btn"), Sense::click());
+    let close_response = ui.interact(close_rect, ui.id().with("close_btn"), Sense::click()).on_hover_text("Hide indicator");
     if close_response.hovered() {
         painter.circle_filled(
             close_center,
@@ -227,6 +227,7 @@ pub fn draw_popup_card(
         "S",
         "settings_btn",
         settings_open,
+        "Settings",
     ) {
         result.toggle_settings = true;
     }
@@ -241,6 +242,7 @@ pub fn draw_popup_card(
         "?",
         "help_btn",
         false,
+        "Help",
     ) {
         result.help_clicked = true;
     }
@@ -271,9 +273,10 @@ pub fn draw_side_icon(
     icon: &str,
     id_source: &str,
     selected: bool,
+    tooltip: &str,
 ) -> bool {
     let rect = egui::Rect::from_center_size(center, egui::vec2(28.0, 28.0));
-    let response = ui.interact(rect, ui.id().with(id_source), Sense::click());
+    let response = ui.interact(rect, ui.id().with(id_source), Sense::click()).on_hover_text(tooltip);
     let painter = ui.painter();
 
     let stroke_color = if selected {
@@ -411,7 +414,7 @@ pub fn draw_mic_button(
     audio_level: f32,
 ) -> egui::Response {
     let rect = egui::Rect::from_center_size(center, egui::vec2(70.0, 70.0));
-    let response = ui.interact(rect, ui.id().with("mic_btn"), Sense::click());
+    let response = ui.interact(rect, ui.id().with("mic_btn"), Sense::click()).on_hover_text("Press F11 to toggle dictation");
     let painter = ui.painter();
 
     if status == AppStatus::Recording {

@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package google.cloud.speech.v2;
+
+service Speech {
+  rpc StreamingRecognize(stream StreamingRecognizeRequest) returns (stream StreamingRecognizeResponse);
+}
+
+message ExplicitDecodingConfig {
+  enum AudioEncoding {
+    AUDIO_ENCODING_UNSPECIFIED = 0;
+    LINEAR16 = 1;
+    MULAW = 2;
+    ALAW = 3;
+    AMR = 4;
+    AMR_WB = 5;
+    FLAC = 6;
+    MP3 = 7;
+    OGG_OPUS = 8;
+    WEBM_OPUS = 9;
+    MP4_AAC = 10;
+    M4A_AAC = 11;
+    MOV_AAC = 12;
+  }
+
+  AudioEncoding encoding = 1;
+  int32 sample_rate_hertz = 2;
+  int32 audio_channel_count = 3;
+}
+
+message RecognitionConfig {
+  oneof decoding_config {
+    ExplicitDecodingConfig explicit_decoding_config = 8;
+  }
+
+  string model = 9;
+  repeated string language_codes = 10;
+}
+
+message StreamingRecognitionFeatures {
+  enum EndpointingSensitivity {
+    ENDPOINTING_SENSITIVITY_UNSPECIFIED = 0;
+    ENDPOINTING_SENSITIVITY_STANDARD = 1;
+    ENDPOINTING_SENSITIVITY_SUPERSHORT = 2;
+    ENDPOINTING_SENSITIVITY_SHORT = 3;
+  }
+
+  bool enable_voice_activity_events = 1;
+  bool interim_results = 2;
+  EndpointingSensitivity endpointing_sensitivity = 8;
+}
+
+message StreamingRecognitionConfig {
+  RecognitionConfig config = 1;
+  StreamingRecognitionFeatures streaming_features = 2;
+}
+
+message StreamingRecognizeRequest {
+  string recognizer = 3;
+
+  oneof streaming_request {
+    bytes audio = 5;
+    StreamingRecognitionConfig streaming_config = 6;
+  }
+}
+
+message SpeechRecognitionAlternative {
+  string transcript = 1;
+}
+
+message StreamingRecognitionResult {
+  repeated SpeechRecognitionAlternative alternatives = 1;
+  bool is_final = 2;
+  float stability = 3;
+}
+
+message StreamingRecognizeResponse {
+  enum SpeechEventType {
+    SPEECH_EVENT_TYPE_UNSPECIFIED = 0;
+    END_OF_SINGLE_UTTERANCE = 1;
+    SPEECH_ACTIVITY_BEGIN = 2;
+    SPEECH_ACTIVITY_END = 3;
+  }
+
+  SpeechEventType speech_event_type = 3;
+  repeated StreamingRecognitionResult results = 6;
+}

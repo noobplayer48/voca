@@ -1,0 +1,3 @@
+## 2024-05-15 - Tooltips for Global Hotkeys
+**Learning:** Some UI elements might look clickable but are actually purely indicators for a background process controlled by a global hotkey. Adding descriptive tooltips to these unclickable/indicator elements is crucial for informing users about the correct hotkey or action they need to take, significantly improving discoverability and reducing confusion.
+**Action:** When creating or working with status indicators that look like interactive buttons, always ensure they have tooltips explaining how to interact with the service they represent (e.g., specifying the global hotkey like "Press F11 to toggle").

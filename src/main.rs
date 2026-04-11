@@ -36,7 +36,7 @@ pub const DEFAULT_ASIA_SPEECH_REGION: &str = "asia-southeast1";
 
 fn main() -> Result<(), eframe::Error> {
     dotenv().ok();
-
+    
     let gcp_project_id = match env::var("GCP_PROJECT_ID") {
         Ok(val) => val,
         Err(_) => {
@@ -45,6 +45,10 @@ fn main() -> Result<(), eframe::Error> {
             return Ok(());
         }
     };
+
+    if env::var("GROQ_API_KEY").is_err() {
+        eprintln!("Warning: GROQ_API_KEY is not set. Groq Whisper features will be unavailable.");
+    }
     let speech_model = load_selected_speech_model();
     let speech_region = env::var("GCP_SPEECH_REGION")
         .ok()

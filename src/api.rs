@@ -475,7 +475,15 @@ pub async fn transcribe_groq(
     audio_bytes: Vec<u8>,
 ) -> Result<String, BoxError> {
     let api_key = std::env::var("GROQ_API_KEY")
-        .map_err(|_| other_error("missing GROQ_API_KEY variable"))?;
+        .map(|k| k.trim().to_string())
+        .map_err(|_| {
+            eprintln!("[-] Error: GROQ_API_KEY not found in environment variables.");
+            other_error("Groq API Key (GROQ_API_KEY) missing")
+        })?;
+    
+    if api_key.is_empty() {
+        return Err(other_error("Groq API Key is empty"));
+    }
 
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
         .file_name("audio.wav")

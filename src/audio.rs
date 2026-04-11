@@ -60,7 +60,7 @@ impl AudioRecorder {
         &mut self,
         audio_sender: Option<UnboundedSender<Vec<u8>>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.buffer.lock().unwrap().clear();
+        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.input_level.store(0, Ordering::Relaxed);
         self.live_stream_sink = None;
 
@@ -185,7 +185,7 @@ impl AudioRecorder {
             .spec
             .take()
             .ok_or("Recorder is not active. Start recording first.")?;
-        let data = self.buffer.lock().unwrap().clone();
+        let data = self.buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.input_level.store(0, Ordering::Relaxed);
         encode_wav(spec, &data)
     }
@@ -214,7 +214,7 @@ where
     T: cpal::Sample,
     i16: cpal::FromSample<T>,
 {
-    let mut guard = writer.lock().unwrap();
+    let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
     let mut peak: u16 = 0;
     let mut mono_samples = Vec::with_capacity(input.len() / channels.max(1) as usize + 1);
     for (i, &sample) in input.iter().enumerate() {
@@ -247,7 +247,7 @@ fn push_live_stream_samples(live_stream_sink: &Arc<Mutex<LiveStreamSink>>, sampl
         return;
     }
 
-    let mut sink = live_stream_sink.lock().unwrap();
+    let mut sink = live_stream_sink.lock().unwrap_or_else(|e| e.into_inner());
     sink.pending_samples.extend_from_slice(samples);
 
     while sink.pending_samples.len() >= sink.chunk_samples {
@@ -261,7 +261,7 @@ fn push_live_stream_samples(live_stream_sink: &Arc<Mutex<LiveStreamSink>>, sampl
 }
 
 fn flush_live_stream_sink(live_stream_sink: &Arc<Mutex<LiveStreamSink>>) {
-    let mut sink = live_stream_sink.lock().unwrap();
+    let mut sink = live_stream_sink.lock().unwrap_or_else(|e| e.into_inner());
     if sink.pending_samples.is_empty() {
         return;
     }

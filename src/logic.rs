@@ -55,10 +55,7 @@ pub fn start_logic_thread(
                         }
 
                         stream_failed_for = None;
-                        typed_words.clear();
-                        if let Ok(mut s) = status.write() {
-                            *s = AppStatus::Idle;
-                        }
+                        reset_app_state(&mut typed_words, &status);
                     }
                     TranscriptionEventKind::Failed(error) => {
                         eprintln!("[-] Streaming Error: {}", error);
@@ -85,10 +82,7 @@ pub fn start_logic_thread(
                                 transcript_tx.clone(),
                             );
                         } else {
-                            typed_words.clear();
-                            if let Ok(mut s) = status.write() {
-                                *s = AppStatus::Idle;
-                            }
+                            reset_app_state(&mut typed_words, &status);
                         }
                     }
                 }
@@ -196,10 +190,7 @@ pub fn start_logic_thread(
                                 transcription_inflight_for = None;
                                 stream_failed_for = None;
                                 pending_fallback = None;
-                                typed_words.clear();
-                                if let Ok(mut s) = status.write() {
-                                    *s = AppStatus::Idle;
-                                }
+                                reset_app_state(&mut typed_words, &status);
                             }
                         }
                     }
@@ -211,6 +202,13 @@ pub fn start_logic_thread(
             }
         }
     });
+}
+
+fn reset_app_state(typed_words: &mut Vec<String>, status: &RwLock<AppStatus>) {
+    typed_words.clear();
+    if let Ok(mut s) = status.write() {
+        *s = AppStatus::Idle;
+    }
 }
 
 fn append_new_words(enigo: &mut Enigo, typed_words: &mut Vec<String>, transcript: &str) {

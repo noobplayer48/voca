@@ -11,6 +11,7 @@ const HOTKEY_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 pub fn start_logic_thread(
     trigger_rx: mpsc::Receiver<()>,
+    trigger_tx: mpsc::Sender<()>,
     status: Arc<RwLock<AppStatus>>,
     speech_model_state: Arc<RwLock<SpeechModel>>,
     audio_level: Arc<AtomicU32>,
@@ -20,6 +21,7 @@ pub fn start_logic_thread(
     thread::spawn(move || {
         let initial_model = *speech_model_state.read().unwrap();
         let mut recorder = AudioRecorder::new(audio_level.clone(), initial_model.preferred_sample_rate_hz());
+        recorder.set_vad_trigger(trigger_tx);
         let mut current_session_model = initial_model;
         let mut is_recording = false;
         let mut enigo = Enigo::new();

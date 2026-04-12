@@ -22,6 +22,7 @@ eframe = "0.26"
 egui = "0.26"
 winreg = "0.52"
 tray-icon = "0.14"
+earshot = "1.0.0"
 
 [dependencies.windows]
 version = "0.52"

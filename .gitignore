@@ -3,4 +3,5 @@
 models/
 **/*.rs.bk
 node_modules/
-.DS_Store
+.DS_Store/
+voca-speech-model.txt

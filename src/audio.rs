@@ -2,12 +2,17 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, mpsc,
 };
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+use earshot::Detector;
 
 const STREAM_CHUNK_DURATION: Duration = Duration::from_millis(100);
+const VAD_SAMPLE_RATE: u32 = 16_000;
+const VAD_FRAME_SIZE: usize = 256;
+const VAD_THRESHOLD: f32 = 0.4;
+const SILENCE_THRESHOLD_FRAMES: u32 = 65; // 2 seconds at 16k/256
 
 struct LiveStreamSink {
     sender: UnboundedSender<Vec<u8>>,
@@ -28,6 +33,15 @@ impl LiveStreamSink {
     }
 }
 
+struct VadState {
+    detector: Detector,
+    silence_frames: u32,
+    buffer: Vec<i16>,
+    trigger_tx: mpsc::Sender<()>,
+    active: bool,
+    downsample_ratio: u32,
+}
+
 pub struct AudioRecorder {
     stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<Vec<i16>>>,
@@ -35,6 +49,7 @@ pub struct AudioRecorder {
     input_level: Arc<AtomicU32>,
     preferred_sample_rate_hz: u32,
     live_stream_sink: Option<Arc<Mutex<LiveStreamSink>>>,
+    vad_state: Option<Arc<Mutex<VadState>>>,
 }
 
 impl AudioRecorder {
@@ -46,7 +61,19 @@ impl AudioRecorder {
             input_level,
             preferred_sample_rate_hz,
             live_stream_sink: None,
+            vad_state: None,
         }
+    }
+
+    pub fn set_vad_trigger(&mut self, trigger_tx: mpsc::Sender<()>) {
+        self.vad_state = Some(Arc::new(Mutex::new(VadState {
+            detector: Detector::default(),
+            silence_frames: 0,
+            buffer: Vec::with_capacity(VAD_FRAME_SIZE),
+            trigger_tx,
+            active: false,
+            downsample_ratio: 1,
+        })));
     }
 
     pub fn start_streaming(
@@ -106,6 +133,27 @@ impl AudioRecorder {
         let stream_sink_f32 = self.live_stream_sink.clone();
         let stream_sink_i16 = self.live_stream_sink.clone();
         let stream_sink_u16 = self.live_stream_sink.clone();
+        
+        let vad_state_f32 = self.vad_state.clone();
+        let vad_state_i16 = self.vad_state.clone();
+        let vad_state_u16 = self.vad_state.clone();
+        
+        if let Some(ref vs) = self.vad_state {
+            if let Ok(mut guard) = vs.lock() {
+                guard.silence_frames = 0;
+                guard.buffer.clear();
+                guard.active = sample_rate >= VAD_SAMPLE_RATE; // Support anything above 16k
+                guard.downsample_ratio = (sample_rate as f32 / VAD_SAMPLE_RATE as f32).round() as u32;
+                
+                if !guard.active || guard.downsample_ratio == 0 {
+                    guard.active = false;
+                    eprintln!("Warning: VAD disabled because sample rate is too low: {} Hz", sample_rate);
+                } else if guard.downsample_ratio > 1 {
+                    println!("[*] VAD: Using {}:1 downsampler for {} Hz input", guard.downsample_ratio, sample_rate);
+                }
+            }
+        }
+
         let err_fn = move |err| {
             eprintln!("an error occurred on the audio stream: {}", err);
         };
@@ -123,6 +171,7 @@ impl AudioRecorder {
                         &buf_clone,
                         &level_f32,
                         stream_sink_f32.as_ref(),
+                        vad_state_f32.as_ref(),
                     )
                 },
                 err_fn,
@@ -137,6 +186,7 @@ impl AudioRecorder {
                         &buf_clone,
                         &level_i16,
                         stream_sink_i16.as_ref(),
+                        vad_state_i16.as_ref(),
                     )
                 },
                 err_fn,
@@ -151,6 +201,7 @@ impl AudioRecorder {
                         &buf_clone,
                         &level_u16,
                         stream_sink_u16.as_ref(),
+                        vad_state_u16.as_ref(),
                     )
                 },
                 err_fn,
@@ -209,26 +260,36 @@ fn write_input_data<T>(
     writer: &Arc<Mutex<Vec<i16>>>,
     input_level: &Arc<AtomicU32>,
     live_stream_sink: Option<&Arc<Mutex<LiveStreamSink>>>,
+    vad_state: Option<&Arc<Mutex<VadState>>>,
 )
 where
     T: cpal::Sample,
     i16: cpal::FromSample<T>,
+    i32: cpal::FromSample<T>,
 {
     let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
     let mut peak: u16 = 0;
-    let mut mono_samples = Vec::with_capacity(input.len() / channels.max(1) as usize + 1);
-    for (i, &sample) in input.iter().enumerate() {
-        if i % (channels as usize) == 0 {
-            let sample_i16 = sample.to_sample::<i16>();
-            guard.push(sample_i16);
-            mono_samples.push(sample_i16);
-            peak = peak.max(sample_i16.unsigned_abs());
-        }
+    let host_channels = channels as usize;
+    let mut mono_samples = Vec::with_capacity(input.len() / host_channels + 1);
+    let mut i = 0;
+    while i + host_channels <= input.len() {
+        let frame = &input[i..i + host_channels];
+        let sum: i32 = frame.iter().map(|&s| s.to_sample::<i16>() as i32).sum();
+        let mono_sample_i16 = (sum / host_channels as i32) as i16;
+        
+        guard.push(mono_sample_i16);
+        mono_samples.push(mono_sample_i16);
+        peak = peak.max(mono_sample_i16.unsigned_abs());
+        i += host_channels;
     }
     drop(guard);
 
     if let Some(live_stream_sink) = live_stream_sink {
         push_live_stream_samples(live_stream_sink, &mono_samples);
+    }
+
+    if let Some(vs) = vad_state {
+        process_vad(vs, &mono_samples);
     }
 
     let instant_level = peak as f32 / i16::MAX as f32;
@@ -277,4 +338,42 @@ fn samples_to_bytes(samples: &[i16]) -> Vec<u8> {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
+}
+
+fn process_vad(vad_state: &Arc<Mutex<VadState>>, samples: &[i16]) {
+    let mut guard = match vad_state.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    if !guard.active {
+        return;
+    }
+
+    let ratio = guard.downsample_ratio;
+    for (i, &sample) in samples.iter().enumerate() {
+        if i as u32 % ratio == 0 {
+            guard.buffer.push(sample);
+        }
+    }
+
+    while guard.buffer.len() >= VAD_FRAME_SIZE {
+        let frame: Vec<i16> = guard.buffer.drain(..VAD_FRAME_SIZE).collect();
+        let score = guard.detector.predict_i16(&frame);
+
+        if score >= VAD_THRESHOLD {
+            guard.silence_frames = 0;
+            guard.active = true; // Re-arm if we were deactivated
+        } else {
+            if guard.active {
+                guard.silence_frames += 1;
+                if guard.silence_frames >= SILENCE_THRESHOLD_FRAMES {
+                    println!("🔴 VAD: Silence detected — stopping transcription");
+                    let _ = guard.trigger_tx.send(());
+                    guard.silence_frames = 0;
+                    guard.active = false; // Prevent double-triggering until speech resumes
+                }
+            }
+        }
+    }
 }

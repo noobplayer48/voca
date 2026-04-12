@@ -79,12 +79,15 @@ fn main() -> Result<(), eframe::Error> {
     // 2. Start dictation logic thread.
     logic::start_logic_thread(
         rx,
+        tx.clone(),
         status.clone(),
         speech_model_state.clone(),
         audio_level.clone(),
         gcp_project_id,
         speech_region,
     );
+
+    // Remove the separate VAD thread — VAD is now inside AudioRecorder.
 
     // 3. Start UI window on main thread.
     let options = eframe::NativeOptions {

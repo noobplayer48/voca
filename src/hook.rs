@@ -44,12 +44,11 @@ unsafe extern "system" fn hook_callback(ncode: i32, wparam: WPARAM, lparam: LPAR
     CallNextHookEx(current_hook, ncode, wparam, lparam)
 }
 
-pub fn start_hook_loop() {
+pub fn start_hook_loop() -> windows::core::Result<()> {
     unsafe {
-        let h_instance = GetModuleHandleW(None).unwrap();
-        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_callback), h_instance, 0)
-            .expect("Failed to install global keyboard hook");
-            
+        let h_instance = GetModuleHandleW(None)?;
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_callback), h_instance, 0)?;
+
         GLOBAL_HOOK = Some(hook);
 
         let mut msg = MSG::default();
@@ -59,6 +58,8 @@ pub fn start_hook_loop() {
             DispatchMessageW(&msg);
         }
 
-        UnhookWindowsHookEx(hook).unwrap();
+        UnhookWindowsHookEx(hook)?;
+        GLOBAL_HOOK = None;
     }
+    Ok(())
 }

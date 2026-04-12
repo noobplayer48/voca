@@ -71,7 +71,9 @@ fn main() -> Result<(), eframe::Error> {
     let (tx, rx) = mpsc::channel();
     hook::set_trigger_sender(tx.clone());
     thread::spawn(|| {
-        hook::start_hook_loop();
+        if let Err(e) = hook::start_hook_loop() {
+            eprintln!("Error in Windows hook loop: {:?}", e);
+        }
     });
 
     // 2. Start dictation logic thread.

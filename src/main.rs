@@ -27,9 +27,9 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
 
 pub const WINDOW_TITLE: &str = "Voca Indicator";
-pub const INDICATOR_WIDTH: f32 = 196.0;
-pub const INDICATOR_HEIGHT: f32 = 126.0;
-pub const INDICATOR_TOP_MARGIN: f32 = 72.0;
+pub const INDICATOR_WIDTH: f32 = 180.0;
+pub const INDICATOR_HEIGHT: f32 = 140.0;
+pub const INDICATOR_TOP_MARGIN: f32 = 50.0;
 pub const UI_REPAINT_INTERVAL: Duration = Duration::from_millis(80);
 pub const SPEECH_MODEL_SETTINGS_FILE: &str = "voca-speech-model.txt";
 pub const DEFAULT_ASIA_SPEECH_REGION: &str = "asia-southeast1";
@@ -90,7 +90,7 @@ fn main() -> Result<(), eframe::Error> {
             .with_title(WINDOW_TITLE)
             .with_always_on_top()
             .with_decorations(false)
-            .with_transparent(false)
+            .with_transparent(true)
             .with_mouse_passthrough(false)
             .with_resizable(false)
             .with_inner_size([INDICATOR_WIDTH, INDICATOR_HEIGHT])
@@ -104,9 +104,9 @@ fn main() -> Result<(), eframe::Error> {
     let tray_menu = tray_icon::menu::Menu::new();
     
     let models_to_show = vec![
-        SpeechModel::Chirp3,
-        SpeechModel::Telephony,
         SpeechModel::GroqWhisper,
+        SpeechModel::Telephony,
+        SpeechModel::Chirp3,
     ];
 
     let mut tray_models = Vec::new();
@@ -150,6 +150,9 @@ fn main() -> Result<(), eframe::Error> {
                 tray_models,
                 tray_quit_id,
                 trigger_tx: tx.clone(),
+                icon_scale: 1.0,
+                wave_scale1: 0.5,
+                wave_scale2: 0.5,
             })
         }),
     )
@@ -170,7 +173,7 @@ fn load_selected_speech_model() -> SpeechModel {
         Ok(value) => match SpeechModel::parse(&value) {
             Ok(model) => model.settings_choice(),
             Err(e) => {
-                eprintln!("Warning: {}. Falling back to chirp_3.", e);
+                eprintln!("Warning: {}. Falling back to Groq Whisper.", e);
                 SpeechModel::default()
             }
         },

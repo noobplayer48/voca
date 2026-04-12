@@ -92,7 +92,7 @@ impl GrpcFrameDecoder {
 
 impl Default for SpeechModel {
     fn default() -> Self {
-        Self::Chirp3
+        Self::GroqWhisper
     }
 }
 

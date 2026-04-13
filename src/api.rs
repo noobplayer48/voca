@@ -113,7 +113,7 @@ impl SpeechModel {
             Self::Chirp3 => "chirp_3",
             Self::Telephony => "telephony",
             Self::TelephonyShort => "telephony_short",
-            Self::GroqWhisper => "whisper-large-v3-turbo",
+            Self::GroqWhisper => "whisper-large-v3",
         }
     }
 

@@ -142,6 +142,7 @@ impl AudioRecorder {
             if let Ok(mut guard) = vs.lock() {
                 guard.silence_frames = 0;
                 guard.buffer.clear();
+                guard.detector = Detector::default(); // Ensure fresh state for each recording session
                 guard.active = sample_rate >= VAD_SAMPLE_RATE; // Support anything above 16k
                 guard.downsample_ratio = (sample_rate as f32 / VAD_SAMPLE_RATE as f32).round() as u32;
                 
@@ -363,7 +364,6 @@ fn process_vad(vad_state: &Arc<Mutex<VadState>>, samples: &[i16]) {
 
         if score >= VAD_THRESHOLD {
             guard.silence_frames = 0;
-            guard.active = true; // Re-arm if we were deactivated
         } else {
             if guard.active {
                 guard.silence_frames += 1;
@@ -371,7 +371,8 @@ fn process_vad(vad_state: &Arc<Mutex<VadState>>, samples: &[i16]) {
                     println!("🔴 VAD: Silence detected — stopping transcription");
                     let _ = guard.trigger_tx.send(());
                     guard.silence_frames = 0;
-                    guard.active = false; // Prevent double-triggering until speech resumes
+                    guard.active = false; // Prevent double-triggering until start_inner re-arms
+                    guard.detector = Detector::default(); // Reset GRU state
                 }
             }
         }

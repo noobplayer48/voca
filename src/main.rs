@@ -13,6 +13,7 @@ use crate::types::AppStatus;
 use crate::ui::DictationIndicatorWrapper;
 use dotenv::dotenv;
 use eframe::egui;
+use image::GenericImageView;
 use std::env;
 use std::fs;
 use std::sync::{
@@ -129,14 +130,10 @@ fn main() -> Result<(), eframe::Error> {
     let tray_quit_id = quit_i.id().clone();
     let _ = tray_menu.append(&quit_i);
 
-    let mut rgba = Vec::with_capacity(16 * 16 * 4);
-    for _ in 0..(16 * 16) {
-        rgba.extend_from_slice(&[205, 132, 255, 255]);
-    }
     let tray_icon = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Voca Dictation")
-        .with_icon(tray_icon::Icon::from_rgba(rgba, 16, 16).unwrap())
+        .with_icon(load_icon_from_file())
         .build()
         .unwrap();
 
@@ -200,4 +197,23 @@ pub fn indicator_hwnd() -> Option<HWND> {
             Some(hwnd)
         }
     }
+}
+
+fn load_icon_from_file() -> tray_icon::Icon {
+    let icon_path = "natural-language-processing.png";
+    if let Ok(img) = image::open(icon_path) {
+        let (width, height) = img.dimensions();
+        let rgba = img.to_rgba8().into_raw();
+        tray_icon::Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| fallback_icon())
+    } else {
+        fallback_icon()
+    }
+}
+
+fn fallback_icon() -> tray_icon::Icon {
+    let mut rgba = Vec::with_capacity(16 * 16 * 4);
+    for _ in 0..(16 * 16) {
+        rgba.extend_from_slice(&[205, 132, 255, 255]);
+    }
+    tray_icon::Icon::from_rgba(rgba, 16, 16).unwrap()
 }

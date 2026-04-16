@@ -201,10 +201,34 @@ pub fn indicator_hwnd() -> Option<HWND> {
 
 fn load_icon_from_file() -> tray_icon::Icon {
     let icon_path = "natural-language-processing.png";
-    if let Ok(img) = image::open(icon_path) {
+    if let Ok(mut img) = image::open(icon_path) {
+        // Trim transparency to make the icon look "bigger" in the tray
         let (width, height) = img.dimensions();
-        let rgba = img.to_rgba8().into_raw();
-        tray_icon::Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| fallback_icon())
+        let mut min_x = width;
+        let mut max_x = 0;
+        let mut min_y = height;
+        let mut max_y = 0;
+
+        for (x, y, pixel) in img.pixels() {
+            if pixel[3] > 10 { // Significant opacity
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+
+        let trimmed = if max_x >= min_x && max_y >= min_y {
+            let trim_width = max_x - min_x + 1;
+            let trim_height = max_y - min_y + 1;
+            img.crop(min_x, min_y, trim_width, trim_height)
+        } else {
+            img
+        };
+
+        let (w, h) = trimmed.dimensions();
+        let rgba = trimmed.to_rgba8().into_raw();
+        tray_icon::Icon::from_rgba(rgba, w, h).unwrap_or_else(|_| fallback_icon())
     } else {
         fallback_icon()
     }

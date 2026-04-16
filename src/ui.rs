@@ -206,8 +206,8 @@ pub fn draw_capsule_ui(
     let mut result = PopupUiResult::default();
     
     // We anchor the capsule near the top to leave space for the dropdown below
-    let capsule_size = Vec2::new(120.0, 44.0);
-    let capsule_rect = Rect::from_center_size(ui.max_rect().center_top() + Vec2::new(0.0, 32.0), capsule_size);
+    let capsule_size = Vec2::new(140.0, 52.0);
+    let capsule_rect = Rect::from_center_size(ui.max_rect().center_top() + Vec2::new(0.0, 40.0), capsule_size);
     
     // Background and Interaction
     let response = ui.interact(capsule_rect, ui.id().with("capsule_main"), Sense::click_and_drag());
@@ -232,7 +232,7 @@ pub fn draw_capsule_ui(
     if close_resp.hovered() {
         painter.circle_filled(close_rect.center(), 7.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
     }
-    painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(12.0), Color32::GRAY);
+    painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), Color32::GRAY);
     if close_resp.clicked() {
         result.close_clicked = true;
     }
@@ -265,8 +265,8 @@ pub fn draw_capsule_ui(
     );
 
     // Right: Mic
-    let mic_center = capsule_rect.right_center() - Vec2::new(28.0, 0.0);
-    draw_mic_and_waves(ui, mic_center, capsule_rect, status, icon_scale, wave_scale1, wave_scale2);
+    let mic_center = capsule_rect.right_center() - Vec2::new(32.0, 0.0);
+    draw_mic_and_waves(ui, mic_center, capsule_rect, status, icon_scale * 1.2, wave_scale1, wave_scale2);
 
     // Status / Model Text (below capsule)
     let status_text = match status {
@@ -278,7 +278,7 @@ pub fn draw_capsule_ui(
         Pos2::new(capsule_rect.center().x, capsule_rect.bottom() + 12.0),
         Align2::CENTER_CENTER,
         status_text,
-        FontId::proportional(10.0),
+        FontId::proportional(11.0),
         Color32::from_rgba_unmultiplied(200, 200, 200, 180),
     );
 

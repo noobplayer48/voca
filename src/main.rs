@@ -67,8 +67,9 @@ fn main() -> Result<(), eframe::Error> {
     let speech_model_state = Arc::new(RwLock::new(speech_model));
     let audio_level = Arc::new(AtomicU32::new(0));
 
+    use crate::types::TriggerEvent;
     // 1. Start the Windows hook loop in a separate thread.
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<TriggerEvent>();
     hook::set_trigger_sender(tx.clone());
     thread::spawn(|| {
         if let Err(e) = hook::start_hook_loop() {

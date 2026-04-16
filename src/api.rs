@@ -491,7 +491,7 @@ pub async fn transcribe_groq(
 
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
-        .text("model", SpeechModel::GroqWhisper.api_name())
+        .text("model", "whisper-large-v3")
         .text("response_format", "json");
 
     let res = shared_client()
@@ -504,6 +504,52 @@ pub async fn transcribe_groq(
     if !res.status().is_success() {
         return Err(other_error(format!(
             "Groq API Error {}: {}",
+            res.status(),
+            res.text().await?
+        )));
+    }
+
+    let json_body: Value = res.json().await?;
+    if let Some(text) = json_body.get("text").and_then(|t| t.as_str()) {
+        Ok(text.trim().to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+pub async fn translate_groq(
+    audio_bytes: Vec<u8>,
+) -> Result<String, BoxError> {
+    let api_key = std::env::var("GROQ_API_KEY")
+        .map(|k| k.trim().to_string())
+        .map_err(|_| {
+            eprintln!("[-] Error: GROQ_API_KEY not found in environment variables.");
+            other_error("Groq API Key (GROQ_API_KEY) missing")
+        })?;
+    
+    if api_key.is_empty() {
+        return Err(other_error("Groq API Key is empty"));
+    }
+
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", "whisper-large-v3")
+        .text("response_format", "json");
+
+    let res = shared_client()
+        .post("https://api.groq.com/openai/v1/audio/translations")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        return Err(other_error(format!(
+            "Groq Translation API Error {}: {}",
             res.status(),
             res.text().await?
         )));

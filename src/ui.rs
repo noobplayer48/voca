@@ -1,5 +1,5 @@
 use crate::api::SpeechModel;
-use crate::types::AppStatus;
+use crate::types::{AppStatus, TriggerEvent};
 use eframe::egui;
 use egui::{Align2, Button, Color32, FontId, Pos2, Rect, RichText, Rounding, Sense, Stroke, Vec2, ViewportCommand};
 use std::sync::{atomic::Ordering, Arc, RwLock, atomic::AtomicU32, mpsc};
@@ -32,7 +32,7 @@ pub struct DictationIndicatorWrapper {
     pub _tray_icon: tray_icon::TrayIcon,
     pub tray_models: Vec<(SpeechModel, tray_icon::menu::CheckMenuItem)>,
     pub tray_quit_id: tray_icon::menu::MenuId,
-    pub trigger_tx: mpsc::Sender<()>,
+    pub trigger_tx: mpsc::Sender<TriggerEvent>,
     // Animation States
     pub icon_scale: f32,
     pub wave_scale1: f32,
@@ -151,7 +151,7 @@ impl eframe::App for DictationIndicatorWrapper {
                         if self.settings_open {
                             let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
                             if current_status != AppStatus::Idle {
-                                let _ = self.trigger_tx.send(());
+                                let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
                             }
                         }
                     }
@@ -162,7 +162,7 @@ impl eframe::App for DictationIndicatorWrapper {
                         // If we are currently recording or transcribing, send a signal to stop.
                         let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
                         if current_status != AppStatus::Idle {
-                            let _ = self.trigger_tx.send(());
+                            let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
                         }
 
                         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(offscreen_position()));
@@ -180,7 +180,7 @@ impl eframe::App for DictationIndicatorWrapper {
                         // Automatically start recording with the new model
                         let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
                         if current_status == AppStatus::Idle {
-                            let _ = self.trigger_tx.send(());
+                            let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
                         }
                     }
                 }

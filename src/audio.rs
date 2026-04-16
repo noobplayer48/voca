@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex, mpsc,
 };
+use crate::types::TriggerEvent;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use earshot::Detector;
@@ -12,7 +13,7 @@ const STREAM_CHUNK_DURATION: Duration = Duration::from_millis(100);
 const VAD_SAMPLE_RATE: u32 = 16_000;
 const VAD_FRAME_SIZE: usize = 256;
 const VAD_THRESHOLD: f32 = 0.4;
-const SILENCE_THRESHOLD_FRAMES: u32 = 65; // 2 seconds at 16k/256
+const SILENCE_THRESHOLD_FRAMES: u32 = 125; // 2 seconds at 16k/256
 
 struct LiveStreamSink {
     sender: UnboundedSender<Vec<u8>>,
@@ -37,7 +38,7 @@ struct VadState {
     detector: Detector,
     silence_frames: u32,
     buffer: Vec<i16>,
-    trigger_tx: mpsc::Sender<()>,
+    trigger_tx: mpsc::Sender<TriggerEvent>,
     active: bool,
     downsample_ratio: u32,
 }
@@ -65,7 +66,7 @@ impl AudioRecorder {
         }
     }
 
-    pub fn set_vad_trigger(&mut self, trigger_tx: mpsc::Sender<()>) {
+    pub fn set_vad_trigger(&mut self, trigger_tx: mpsc::Sender<TriggerEvent>) {
         self.vad_state = Some(Arc::new(Mutex::new(VadState {
             detector: Detector::default(),
             silence_frames: 0,
@@ -369,7 +370,7 @@ fn process_vad(vad_state: &Arc<Mutex<VadState>>, samples: &[i16]) {
                 guard.silence_frames += 1;
                 if guard.silence_frames >= SILENCE_THRESHOLD_FRAMES {
                     println!("🔴 VAD: Silence detected — stopping transcription");
-                    let _ = guard.trigger_tx.send(());
+                    let _ = guard.trigger_tx.send(TriggerEvent::Transcribe);
                     guard.silence_frames = 0;
                     guard.active = false; // Prevent double-triggering until start_inner re-arms
                     guard.detector = Detector::default(); // Reset GRU state

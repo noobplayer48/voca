@@ -1,6 +1,6 @@
 use crate::api::{self, SpeechModel, StreamingTranscriptUpdate};
 use crate::audio::AudioRecorder;
-use crate::types::{AppStatus, TranscriptionEvent, TranscriptionEventKind, PendingFallback};
+use crate::types::{AppStatus, TranscriptionEvent, TranscriptionEventKind, PendingFallback, TriggerEvent};
 use enigo::{Enigo, KeyboardControllable};
 use std::sync::{Arc, RwLock, atomic::AtomicU32, mpsc};
 use std::thread;
@@ -10,8 +10,8 @@ const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(220);
 const HOTKEY_POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 pub fn start_logic_thread(
-    trigger_rx: mpsc::Receiver<()>,
-    trigger_tx: mpsc::Sender<()>,
+    trigger_rx: mpsc::Receiver<TriggerEvent>,
+    trigger_tx: mpsc::Sender<TriggerEvent>,
     status: Arc<RwLock<AppStatus>>,
     speech_model_state: Arc<RwLock<SpeechModel>>,
     audio_level: Arc<AtomicU32>,
@@ -29,6 +29,7 @@ pub fn start_logic_thread(
         let mut typed_words: Vec<String> = Vec::new();
         let mut last_hotkey_press = Instant::now() - HOTKEY_DEBOUNCE;
         let mut active_session_id: u64 = 0;
+        let mut session_is_translation: bool = false;
         let mut transcription_inflight_for: Option<u64> = None;
         let mut stream_failed_for: Option<u64> = None;
         let mut pending_fallback: Option<PendingFallback> = None;
@@ -91,7 +92,7 @@ pub fn start_logic_thread(
             }
 
             match trigger_rx.recv_timeout(HOTKEY_POLL_INTERVAL) {
-                Ok(_) => {
+                Ok(trigger_event) => {
                     if last_hotkey_press.elapsed() < HOTKEY_DEBOUNCE {
                         continue;
                     }
@@ -111,7 +112,8 @@ pub fn start_logic_thread(
                         recorder.set_preferred_sample_rate_hz(
                             current_session_model.preferred_sample_rate_hz(),
                         );
-                        println!("[*] Started recording...");
+                        session_is_translation = trigger_event == TriggerEvent::Translate;
+                        println!("[*] Started recording ({:?})...", trigger_event);
                         println!("[*] Using speech model: {}", current_session_model.api_name());
                         let (audio_chunk_tx, audio_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
                         if let Err(e) = recorder.start_streaming(audio_chunk_tx) {
@@ -128,9 +130,9 @@ pub fn start_logic_thread(
                                 .unwrap_or(current_session_model.preferred_sample_rate_hz());
                             println!("[*] Live stream sample rate: {} Hz", sample_rate_hz);
                             
-                            if current_session_model == SpeechModel::GroqWhisper {
+                            if current_session_model == SpeechModel::GroqWhisper || session_is_translation {
                                 // Groq doesn't stream audio natively over gRPC like GCP. 
-                                // We force it into a full-file fallback.
+                                // Also, translation currently uses full-file fallback.
                                 stream_failed_for = Some(active_session_id);
                             } else {
                                 spawn_streaming_session(
@@ -163,12 +165,20 @@ pub fn start_logic_thread(
                                     println!("[*] Live streaming was unavailable. Using full-file fallback...");
                                     transcription_inflight_for = Some(active_session_id);
                                     stream_failed_for = None;
-                                    if current_session_model == SpeechModel::GroqWhisper {
-                                        spawn_groq_fallback_task(
-                                            active_session_id,
-                                            wav_bytes,
-                                            transcript_tx.clone(),
-                                        );
+                                    if current_session_model == SpeechModel::GroqWhisper || session_is_translation {
+                                        if session_is_translation {
+                                            spawn_groq_translate_task(
+                                                active_session_id,
+                                                wav_bytes,
+                                                transcript_tx.clone(),
+                                            );
+                                        } else {
+                                            spawn_groq_fallback_task(
+                                                active_session_id,
+                                                wav_bytes,
+                                                transcript_tx.clone(),
+                                            );
+                                        }
                                     } else {
                                         spawn_fallback_transcription_task(
                                             active_session_id,
@@ -184,6 +194,7 @@ pub fn start_logic_thread(
                                         session_id: active_session_id,
                                         wav_bytes,
                                         speech_model: current_session_model,
+                                        is_translation: session_is_translation,
                                     });
                                 }
                             }
@@ -357,6 +368,41 @@ fn spawn_groq_fallback_task(
     thread::spawn(move || {
         let transcript = match tokio::runtime::Runtime::new() {
             Ok(rt) => match rt.block_on(api::transcribe_groq(wav_bytes)) {
+                Ok(text) => Ok(text),
+                Err(e) => Err(e.to_string()),
+            },
+            Err(e) => Err(format!("Failed to create async runtime: {}", e)),
+        };
+
+        match transcript {
+            Ok(text) => {
+                let _ = tx.send(TranscriptionEvent {
+                    session_id,
+                    kind: TranscriptionEventKind::Transcript { transcript: text },
+                });
+                let _ = tx.send(TranscriptionEvent {
+                    session_id,
+                    kind: TranscriptionEventKind::Completed,
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(TranscriptionEvent {
+                    session_id,
+                    kind: TranscriptionEventKind::Failed(error),
+                });
+            }
+        }
+    });
+}
+
+fn spawn_groq_translate_task(
+    session_id: u64,
+    wav_bytes: Vec<u8>,
+    tx: mpsc::Sender<TranscriptionEvent>,
+) {
+    thread::spawn(move || {
+        let transcript = match tokio::runtime::Runtime::new() {
+            Ok(rt) => match rt.block_on(api::translate_groq(wav_bytes)) {
                 Ok(text) => Ok(text),
                 Err(e) => Err(e.to_string()),
             },

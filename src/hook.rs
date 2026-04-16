@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use lazy_static::lazy_static;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
+use crate::types::TriggerEvent;
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F11, VK_F12};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
@@ -11,12 +12,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 lazy_static! {
-    static ref EVENT_TX: Mutex<Option<Sender<()>>> = Mutex::new(None);
+    static ref EVENT_TX: Mutex<Option<Sender<TriggerEvent>>> = Mutex::new(None);
 }
 
 static mut GLOBAL_HOOK: Option<HHOOK> = None;
 
-pub fn set_trigger_sender(tx: Sender<()>) {
+pub fn set_trigger_sender(tx: Sender<TriggerEvent>) {
     if let Ok(mut guard) = EVENT_TX.lock() {
         *guard = Some(tx);
     }
@@ -28,13 +29,21 @@ unsafe extern "system" fn hook_callback(ncode: i32, wparam: WPARAM, lparam: LPAR
         let msg = wparam.0 as u32;
 
         if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-            if kb_struct.vkCode == VK_F11.0 as u32 {
+            let event = if kb_struct.vkCode == VK_F11.0 as u32 {
+                Some(TriggerEvent::Transcribe)
+            } else if kb_struct.vkCode == VK_F12.0 as u32 {
+                Some(TriggerEvent::Translate)
+            } else {
+                None
+            };
+
+            if let Some(trigger) = event {
                 if let Ok(guard) = EVENT_TX.lock() {
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(());
+                        let _ = tx.send(trigger);
                     }
                 }
-                return LRESULT(1); // Swallow F11
+                return LRESULT(1); // Swallow hotkeys
             }
         }
     }

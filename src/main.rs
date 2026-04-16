@@ -200,7 +200,7 @@ pub fn indicator_hwnd() -> Option<HWND> {
 }
 
 fn load_icon_from_file() -> tray_icon::Icon {
-    let icon_path = "natural-language-processing.png";
+    let icon_path = "wave-sound (1).png";
     if let Ok(mut img) = image::open(icon_path) {
         // Trim transparency to make the icon look "bigger" in the tray
         let (width, height) = img.dimensions();

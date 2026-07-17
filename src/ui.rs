@@ -1,24 +1,21 @@
 #[path = "audio_bars_ui.rs"]
 pub mod audio_bars_ui;
 
-use crate::api::SpeechModel;
 use crate::types::{AppStatus, TriggerEvent};
 use eframe::egui;
 use egui::{Color32, FontId, RichText, Sense, ViewportCommand};
 use std::sync::{atomic::Ordering, Arc, RwLock, atomic::AtomicU32, mpsc};
 use std::fs;
-use std::env;
 use crate::indicator_hwnd;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::Win32::Foundation::HWND;
-use crate::{UI_REPAINT_INTERVAL, SPEECH_MODEL_SETTINGS_FILE};
+use crate::UI_REPAINT_INTERVAL;
 use crate::utils::{top_center_position, offscreen_position, move_indicator_to_current_virtual_desktop};
 
 pub struct DictationIndicatorWrapper {
     pub status: Arc<RwLock<AppStatus>>,
-    pub speech_model: Arc<RwLock<SpeechModel>>,
     pub language: Arc<RwLock<String>>,
     pub audio_level: Arc<AtomicU32>,
     pub was_visible: bool,
@@ -26,7 +23,6 @@ pub struct DictationIndicatorWrapper {
     pub visibility_initialized: bool,
     pub settings_open: bool,
     pub _tray_icon: tray_icon::TrayIcon,
-    pub tray_models: Vec<(SpeechModel, tray_icon::menu::CheckMenuItem)>,
     pub tray_lang_hi: tray_icon::menu::CheckMenuItem,
     pub tray_lang_en: tray_icon::menu::CheckMenuItem,
     pub tray_quit_id: tray_icon::menu::MenuId,
@@ -151,28 +147,6 @@ impl eframe::App for DictationIndicatorWrapper {
                     *lang = "en".to_string();
                 }
                 persist_selected_language("en");
-            } else {
-                for (model, item) in &self.tray_models {
-                    if event.id == *item.id() {
-                        if let Ok(mut m) = self.speech_model.write() {
-                            *m = *model;
-                        }
-                        crate::ui::persist_selected_speech_model(*model);
-                    }
-                }
-            }
-        }
-
-        let synced_model = self
-            .speech_model
-            .read()
-            .map(|model| *model)
-            .unwrap_or_default();
-
-        for (model, item) in &self.tray_models {
-            let should_be_checked = *model == synced_model;
-            if item.is_checked() != should_be_checked {
-                item.set_checked(should_be_checked);
             }
         }
 
@@ -348,16 +322,6 @@ pub fn apply_no_taskbar_style() -> bool {
     }
 }
 
-pub fn persist_selected_speech_model(model: SpeechModel) {
-    let normalized = model.settings_choice().api_name();
-    env::set_var("GCP_SPEECH_MODEL", normalized);
-    if let Err(e) = fs::write(SPEECH_MODEL_SETTINGS_FILE, format!("{}\n", normalized)) {
-        eprintln!(
-            "Warning: failed to save speech model to {}: {}",
-            SPEECH_MODEL_SETTINGS_FILE, e
-        );
-    }
-}
 
 pub fn persist_selected_language(lang: &str) {
     if let Err(e) = fs::write("voca-language.txt", format!("{}\n", lang)) {

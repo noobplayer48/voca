@@ -11,7 +11,6 @@ mod ocr;
 
 pub static EGUI_CONTEXT: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
 
-use crate::api::SpeechModel;
 use crate::types::AppStatus;
 use crate::ui::DictationIndicatorWrapper;
 
@@ -33,21 +32,18 @@ pub const INDICATOR_WIDTH: f32 = 180.0;
 pub const INDICATOR_HEIGHT: f32 = 140.0;
 pub const INDICATOR_TOP_MARGIN: f32 = 50.0;
 pub const UI_REPAINT_INTERVAL: Duration = Duration::from_millis(80);
-pub const SPEECH_MODEL_SETTINGS_FILE: &str = "voca-speech-model.txt";
 pub const DEFAULT_ASIA_SPEECH_REGION: &str = "asia-southeast1";
 
 fn main() -> Result<(), eframe::Error> {
-    let speech_model = load_selected_speech_model();
     let selected_language = load_selected_language();
 
     println!("========================================");
     println!("Voca Dictation Service Running!      ");
     println!("Press F11 to toggle dictation ON/OFF.   ");
-    println!("Speech model: {}", speech_model.display_name());
+    println!("Speech model: Groq Whisper");
     println!("========================================\n");
 
     let status = Arc::new(RwLock::new(AppStatus::Idle));
-    let speech_model_state = Arc::new(RwLock::new(speech_model));
     let language_state = Arc::new(RwLock::new(selected_language.clone()));
     let audio_level = Arc::new(AtomicU32::new(0));
 
@@ -70,7 +66,6 @@ fn main() -> Result<(), eframe::Error> {
         rx,
         tx.clone(),
         status.clone(),
-        speech_model_state.clone(),
         language_state.clone(),
         audio_level.clone(),
         ocr_triggered.clone(),
@@ -97,20 +92,6 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let tray_menu = tray_icon::menu::Menu::new();
-    
-    let models_to_show = vec![
-        SpeechModel::GroqWhisper,
-    ];
-
-    let mut tray_models = Vec::new();
-    for m in models_to_show {
-        let is_selected = m == speech_model;
-        let item = tray_icon::menu::CheckMenuItem::new(m.display_name(), true, is_selected, None);
-        let _ = tray_menu.append(&item);
-        tray_models.push((m, item));
-    }
-
-    let _ = tray_menu.append(&tray_icon::menu::PredefinedMenuItem::separator());
 
     // Language selection items
     let lang_hi_item = tray_icon::menu::CheckMenuItem::new("Hindi (hi)", true, selected_language == "hi", None);
@@ -143,7 +124,6 @@ fn main() -> Result<(), eframe::Error> {
             let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
             Box::new(DictationIndicatorWrapper {
                 status: status.clone(),
-                speech_model: speech_model_state.clone(),
                 language: language_state.clone(),
                 audio_level: audio_level.clone(),
                 was_visible: false,
@@ -151,7 +131,6 @@ fn main() -> Result<(), eframe::Error> {
                 visibility_initialized: false,
                 settings_open: false,
                 _tray_icon: tray_icon,
-                tray_models,
                 tray_lang_hi: lang_hi_item,
                 tray_lang_en: lang_en_item,
                 tray_quit_id,
@@ -168,10 +147,6 @@ fn main() -> Result<(), eframe::Error> {
             })
         }),
     )
-}
-
-fn load_selected_speech_model() -> SpeechModel {
-    SpeechModel::GroqWhisper
 }
 
 fn load_selected_language() -> String {

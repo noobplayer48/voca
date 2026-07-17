@@ -1,4 +1,4 @@
-use crate::api::{self, SpeechModel};
+use crate::api;
 use crate::audio::AudioRecorder;
 use crate::types::{AppStatus, TranscriptionEvent, TranscriptionEventKind, TriggerEvent};
 
@@ -13,15 +13,13 @@ pub fn start_logic_thread(
     trigger_rx: mpsc::Receiver<TriggerEvent>,
     trigger_tx: mpsc::Sender<TriggerEvent>,
     status: Arc<RwLock<AppStatus>>,
-    speech_model_state: Arc<RwLock<SpeechModel>>,
     language_state: Arc<RwLock<String>>,
     audio_level: Arc<AtomicU32>,
     ocr_triggered: Arc<std::sync::atomic::AtomicBool>,
     language_toast: Arc<RwLock<Option<(String, Instant)>>>,
 ) {
     thread::spawn(move || {
-        let initial_model = *speech_model_state.read().unwrap();
-        let mut recorder = AudioRecorder::new(audio_level.clone(), initial_model.preferred_sample_rate_hz());
+        let mut recorder = AudioRecorder::new(audio_level.clone(), 16_000);
         recorder.set_vad_trigger(trigger_tx);
         let mut is_recording = false;
         let mut recording_start_time = Instant::now();
@@ -82,17 +80,10 @@ pub fn start_logic_thread(
                             continue;
                         }
 
-                        let current_session_model = speech_model_state
-                            .read()
-                            .map(|model| *model)
-                            .unwrap_or_default()
-                            .settings_choice();
-                        recorder.set_preferred_sample_rate_hz(
-                            current_session_model.preferred_sample_rate_hz(),
-                        );
+                        recorder.set_preferred_sample_rate_hz(16_000);
                         session_is_translation = trigger_event == TriggerEvent::Translate;
                         println!("[*] Started recording ({:?})...", trigger_event);
-                        println!("[*] Using speech model: {}", current_session_model.api_name());
+                        println!("[*] Using speech model: whisper-large-v3");
                         
                         let (audio_chunk_tx, _audio_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
                         if let Err(e) = recorder.start_streaming(audio_chunk_tx) {
@@ -105,7 +96,7 @@ pub fn start_logic_thread(
                             typed_words.clear();
                             let sample_rate_hz = recorder
                                 .sample_rate_hz()
-                                .unwrap_or(current_session_model.preferred_sample_rate_hz());
+                                .unwrap_or(16_000);
                             println!("[*] Live stream sample rate: {} Hz", sample_rate_hz);
                             
                             if let Ok(mut s) = status.write() {
@@ -136,14 +127,7 @@ pub fn start_logic_thread(
                             let _ = recorder.stop();
                             
                             // Immediately restart recording with new language
-                            let current_session_model = speech_model_state
-                                .read()
-                                .map(|model| *model)
-                                .unwrap_or_default()
-                                .settings_choice();
-                            recorder.set_preferred_sample_rate_hz(
-                                current_session_model.preferred_sample_rate_hz(),
-                            );
+                            recorder.set_preferred_sample_rate_hz(16_000);
                             session_is_translation = false; // toggling language is always for transcription
                             println!("[*] Restarting recording with language: {}", new_lang);
                             

@@ -12,49 +12,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 static HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpeechModel {
-    // Groq Whisper
-    GroqWhisper,
-}
 
-impl Default for SpeechModel {
-    fn default() -> Self {
-        Self::GroqWhisper
-    }
-}
-
-impl SpeechModel {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        let normalized = value.trim().to_ascii_lowercase().replace("-", "_");
-        match normalized.as_str() {
-            "groq" | "groq_whisper" | "groq whisper" => Ok(Self::GroqWhisper),
-            other => Err(format!("Unsupported speech model `{}`", other)),
-        }
-    }
-
-    pub fn api_name(self) -> &'static str {
-        match self {
-            Self::GroqWhisper => "whisper-large-v3",
-        }
-    }
-
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::GroqWhisper => "Groq Whisper",
-        }
-    }
-
-    pub fn settings_choice(self) -> Self {
-        self
-    }
-
-    pub fn preferred_sample_rate_hz(self) -> u32 {
-        match self {
-            Self::GroqWhisper => 16_000,
-        }
-    }
-}
 
 fn shared_client() -> &'static Client {
     HTTP_CLIENT.get_or_init(|| {

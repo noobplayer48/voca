@@ -1,7 +1,10 @@
+#[path = "audio_bars_ui.rs"]
+pub mod audio_bars_ui;
+
 use crate::api::SpeechModel;
 use crate::types::{AppStatus, TriggerEvent};
 use eframe::egui;
-use egui::{Align2, Button, Color32, FontId, Pos2, Rect, RichText, Rounding, Sense, Stroke, Vec2, ViewportCommand};
+use egui::{Color32, FontId, RichText, Sense, ViewportCommand};
 use std::sync::{atomic::Ordering, Arc, RwLock, atomic::AtomicU32, mpsc};
 use std::fs;
 use std::env;
@@ -13,17 +16,10 @@ use windows::Win32::Foundation::HWND;
 use crate::{UI_REPAINT_INTERVAL, SPEECH_MODEL_SETTINGS_FILE};
 use crate::utils::{top_center_position, offscreen_position, move_indicator_to_current_virtual_desktop};
 
-#[derive(Default)]
-pub struct PopupUiResult {
-    pub close_clicked: bool,
-    pub help_clicked: bool,
-    pub toggle_settings: bool,
-    pub selected_model: Option<SpeechModel>,
-}
-
 pub struct DictationIndicatorWrapper {
     pub status: Arc<RwLock<AppStatus>>,
     pub speech_model: Arc<RwLock<SpeechModel>>,
+    pub language: Arc<RwLock<String>>,
     pub audio_level: Arc<AtomicU32>,
     pub was_visible: bool,
     pub style_applied: bool,
@@ -31,12 +27,19 @@ pub struct DictationIndicatorWrapper {
     pub settings_open: bool,
     pub _tray_icon: tray_icon::TrayIcon,
     pub tray_models: Vec<(SpeechModel, tray_icon::menu::CheckMenuItem)>,
+    pub tray_lang_hi: tray_icon::menu::CheckMenuItem,
+    pub tray_lang_en: tray_icon::menu::CheckMenuItem,
     pub tray_quit_id: tray_icon::menu::MenuId,
+    pub tray_settings_id: tray_icon::menu::MenuId,
     pub trigger_tx: mpsc::Sender<TriggerEvent>,
-    // Animation States
-    pub icon_scale: f32,
-    pub wave_scale1: f32,
-    pub wave_scale2: f32,
+    pub twinkle_vad_state: audio_bars_ui::TwinkleVadState,
+    pub ocr_triggered: Arc<std::sync::atomic::AtomicBool>,
+    pub ocr_state: crate::ocr::OcrState,
+    pub ocr_tx: mpsc::Sender<Result<String, String>>,
+    pub ocr_rx: mpsc::Receiver<Result<String, String>>,
+    pub show_settings_window: bool,
+    pub groq_api_key_input: String,
+    pub language_toast: Arc<RwLock<Option<(String, std::time::Instant)>>>,
 }
 
 impl eframe::App for DictationIndicatorWrapper {
@@ -46,34 +49,88 @@ impl eframe::App for DictationIndicatorWrapper {
         visuals.window_fill = Color32::TRANSPARENT;
         ctx.set_visuals(visuals);
 
+        let _ = crate::EGUI_CONTEXT.set(ctx.clone());
+
+        // Handle OCR Trigger — spawn a thread that does capture + selection + OCR
+        if self.ocr_triggered.swap(false, Ordering::Relaxed) {
+            let ocr_tx = self.ocr_tx.clone();
+            let ctx_clone = ctx.clone();
+            std::thread::spawn(move || {
+                // run_ocr_capture blocks until user finishes or cancels selection
+                let Some(cropped) = crate::ocr::run_ocr_capture() else {
+                    return; // User cancelled
+                };
+
+                // Encode to PNG
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if let Err(e) = image::write_buffer_with_format(
+                    &mut cursor,
+                    &cropped,
+                    cropped.width(),
+                    cropped.height(),
+                    image::ColorType::Rgba8,
+                    image::ImageFormat::Png,
+                ) {
+                    let _ = ocr_tx.send(Err(format!("Encode error: {}", e)));
+                    ctx_clone.request_repaint();
+                    return;
+                }
+
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = ocr_tx.send(Err(format!("Runtime error: {}", e)));
+                        ctx_clone.request_repaint();
+                        return;
+                    }
+                };
+
+                match rt.block_on(crate::api::ocr_groq(png_bytes)) {
+                    Ok(text) => {
+                        let _ = ocr_tx.send(Ok(text));
+                    }
+                    Err(e) => {
+                        let _ = ocr_tx.send(Err(e.to_string()));
+                    }
+                }
+                ctx_clone.request_repaint();
+            });
+        }
+
+        // Handle OCR completions
+        while let Ok(res) = self.ocr_rx.try_recv() {
+            match res {
+                Ok(text) => {
+                    ctx.output_mut(|o| o.copied_text = text);
+                    self.ocr_state.status_message = Some(("Copied to clipboard!".to_string(), std::time::Instant::now()));
+                }
+                Err(err) => {
+                    self.ocr_state.status_message = Some((format!("OCR failed: {}", err), std::time::Instant::now()));
+                }
+            }
+        }
+
+        // Clear status message after 3 seconds
+        if let Some((_, time)) = &self.ocr_state.status_message {
+            if time.elapsed() > std::time::Duration::from_secs(3) {
+                self.ocr_state.status_message = None;
+            }
+        }
+
         let current_status = self
             .status
             .read()
             .map(|status| *status)
             .unwrap_or(AppStatus::Idle);
-        let current_speech_model = self
-            .speech_model
-            .read()
-            .map(|model| *model)
-            .unwrap_or_default();
-        let audio_level_raw = (self.audio_level.load(Ordering::Relaxed) as f32 / 1000.0).clamp(0.0, 1.0);
-        let should_show = current_status != AppStatus::Idle || self.settings_open;
+        let toast_active = self.language_toast.read()
+            .map(|t| t.as_ref().map(|(_, when)| when.elapsed().as_secs_f32() < 1.5).unwrap_or(false))
+            .unwrap_or(false);
+        let should_show = current_status != AppStatus::Idle || toast_active;
 
-        // --- ANIMATION & LERPING ---
         if should_show {
             ctx.request_repaint();
         }
-
-        let (target_icon_scale, target_wave_scale) = if current_status == AppStatus::Recording {
-            let volume_normalized = (audio_level_raw * 10.0).clamp(0.0, 1.0);
-            (1.0 + (volume_normalized * 0.3), if volume_normalized > 0.05 { 1.0 + (volume_normalized * 6.0) } else { 0.5 })
-        } else {
-            (1.0, 0.5)
-        };
-
-        self.icon_scale += (target_icon_scale - self.icon_scale) * 0.3;
-        self.wave_scale1 += (target_wave_scale - self.wave_scale1) * 0.25;
-        self.wave_scale2 += (target_wave_scale - self.wave_scale2) * 0.10;
 
         // Continuously enforce taskbar hiding (eframe/winit sometimes internally resets styles)
         apply_no_taskbar_style();
@@ -81,6 +138,19 @@ impl eframe::App for DictationIndicatorWrapper {
         if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
             if event.id == self.tray_quit_id {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
+            } else if event.id == self.tray_settings_id {
+                self.show_settings_window = true;
+                ctx.request_repaint();
+            } else if event.id == *self.tray_lang_hi.id() {
+                if let Ok(mut lang) = self.language.write() {
+                    *lang = "hi".to_string();
+                }
+                persist_selected_language("hi");
+            } else if event.id == *self.tray_lang_en.id() {
+                if let Ok(mut lang) = self.language.write() {
+                    *lang = "en".to_string();
+                }
+                persist_selected_language("en");
             } else {
                 for (model, item) in &self.tray_models {
                     if event.id == *item.id() {
@@ -104,6 +174,21 @@ impl eframe::App for DictationIndicatorWrapper {
             if item.is_checked() != should_be_checked {
                 item.set_checked(should_be_checked);
             }
+        }
+
+        // Sync language tray items
+        let synced_lang = self
+            .language
+            .read()
+            .map(|l| l.clone())
+            .unwrap_or_else(|_| "hi".to_string());
+        let hi_checked = synced_lang == "hi";
+        let en_checked = synced_lang == "en";
+        if self.tray_lang_hi.is_checked() != hi_checked {
+            self.tray_lang_hi.set_checked(hi_checked);
+        }
+        if self.tray_lang_en.is_checked() != en_checked {
+            self.tray_lang_en.set_checked(en_checked);
         }
 
         if !self.visibility_initialized {
@@ -133,58 +218,96 @@ impl eframe::App for DictationIndicatorWrapper {
             .frame(egui::Frame::none().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 if should_show {
-                    let result = draw_capsule_ui(
-                        ui,
-                        current_status,
-                        self.icon_scale,
-                        self.wave_scale1,
-                        self.wave_scale2,
-                        self.settings_open,
-                        current_speech_model,
-                    );
-
-                    if result.toggle_settings {
-                        self.settings_open = !self.settings_open;
-                        
-                        // If we are currently recording or transcribing, stop it when opening settings
-                        // so they can choose a new model without it failing to apply.
-                        if self.settings_open {
-                            let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
-                            if current_status != AppStatus::Idle {
-                                let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
-                            }
-                        }
+                    let vad_score = self.audio_level.load(Ordering::Relaxed) as f32 / 1000.0;
+                    static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                    let start = START_TIME.get_or_init(std::time::Instant::now);
+                    let now = std::time::Instant::now()
+                        .duration_since(*start)
+                        .as_secs_f32();
+                    let rect = ui.max_rect();
+                    let response = ui.interact(rect, ui.id().with("window_drag"), Sense::click_and_drag());
+                    if response.drag_started() {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
                     }
+                    audio_bars_ui::draw_twinkle_vad(ui, rect, vad_score, now, &mut self.twinkle_vad_state);
+                }
 
-                    if result.close_clicked {
-                        self.settings_open = false;
-
-                        // If we are currently recording or transcribing, send a signal to stop.
-                        let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
-                        if current_status != AppStatus::Idle {
-                            let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
-                        }
-
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(offscreen_position()));
-                    }
-
-                    if let Some(new_model) = result.selected_model {
-                        if let Ok(mut model) = self.speech_model.write() {
-                            *model = new_model;
-                        }
-                        persist_selected_speech_model(new_model);
-                        
-                        // Close the settings dropdown automatically
-                        self.settings_open = false;
-                        
-                        // Automatically start recording with the new model
-                        let current_status = self.status.read().map(|s| *s).unwrap_or(AppStatus::Idle);
-                        if current_status == AppStatus::Idle {
-                            let _ = self.trigger_tx.send(TriggerEvent::Transcribe);
+                // Language toast: show briefly after double-press toggle
+                if let Ok(toast) = self.language_toast.read() {
+                    if let Some((lang, when)) = toast.as_ref() {
+                        let elapsed = when.elapsed().as_secs_f32();
+                        if elapsed < 1.5 {
+                            let alpha = if elapsed < 1.0 { 1.0 } else { 1.0 - (elapsed - 1.0) / 0.5 };
+                            let a = (alpha * 255.0) as u8;
+                            let label = if lang == "hi" { "Hindi" } else { "English" };
+                            let center = ui.max_rect().center();
+                            let text_pos = egui::Pos2::new(center.x, ui.max_rect().max.y - 16.0);
+                            ui.painter().text(
+                                text_pos,
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                FontId::proportional(13.0),
+                                Color32::from_rgba_unmultiplied(205, 132, 255, a),
+                            );
+                            ctx.request_repaint();
                         }
                     }
                 }
             });
+
+        // Settings Viewport
+        if self.show_settings_window {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("voca_settings_window"),
+                egui::ViewportBuilder::default()
+                    .with_title("Voca Settings")
+                    .with_inner_size([400.0, 150.0])
+                    .with_resizable(false)
+                    .with_always_on_top(),
+                |ctx, _class| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.heading("Settings");
+                        ui.add_space(10.0);
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Groq API Key:");
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut self.groq_api_key_input)
+                                    .password(true)
+                                    .desired_width(250.0)
+                            );
+                            
+                            // Try to paste from clipboard if right clicked (since typical right click menu doesn't exist by default)
+                            if response.secondary_clicked() {
+                                if let Some(clipboard) = ctx.output(|o| Some(o.copied_text.clone())) {
+                                    if !clipboard.is_empty() {
+                                         self.groq_api_key_input = clipboard;
+                                    }
+                                }
+                            }
+                        });
+                        
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("The API key is saved locally in voca-groq-api-key.txt").color(Color32::GRAY).size(11.0));
+                        ui.add_space(15.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button("Save & Close").clicked() {
+                                let _ = std::fs::write("voca-groq-api-key.txt", self.groq_api_key_input.trim());
+                                self.show_settings_window = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.show_settings_window = false;
+                            }
+                        });
+                    });
+
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        self.show_settings_window = false;
+                    }
+                },
+            );
+        }
 
         ctx.request_repaint_after(UI_REPAINT_INTERVAL);
     }
@@ -194,192 +317,7 @@ impl eframe::App for DictationIndicatorWrapper {
     }
 }
 
-pub fn draw_capsule_ui(
-    ui: &mut egui::Ui,
-    status: AppStatus,
-    icon_scale: f32,
-    wave_scale1: f32,
-    wave_scale2: f32,
-    settings_open: bool,
-    selected_model: SpeechModel,
-) -> PopupUiResult {
-    let mut result = PopupUiResult::default();
-    
-    // We anchor the capsule near the top to leave space for the dropdown below
-    let capsule_size = Vec2::new(140.0, 52.0);
-    let capsule_rect = Rect::from_center_size(ui.max_rect().center_top() + Vec2::new(0.0, 40.0), capsule_size);
-    
-    // Background and Interaction
-    let response = ui.interact(capsule_rect, ui.id().with("capsule_main"), Sense::click_and_drag());
-    if response.drag_started() {
-        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
-    }
-    
-    let painter = ui.painter();
-    
-    // Capsule Background
-    painter.rect(
-        capsule_rect,
-        Rounding::same(22.0),
-        Color32::from_rgb(31, 41, 55),
-        Stroke::new(1.0, Color32::from_rgb(55, 65, 81)),
-    );
 
-    // Close button (small 'x' in corner or just use existing)
-    // Actually, let's add a small close button to the top right of the capsule
-    let close_rect = Rect::from_center_size(capsule_rect.right_top() + Vec2::new(-8.0, 8.0), Vec2::new(14.0, 14.0));
-    let close_resp = ui.interact(close_rect, ui.id().with("close_icon"), Sense::click());
-    if close_resp.hovered() {
-        painter.circle_filled(close_rect.center(), 7.0, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
-    }
-    painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), Color32::GRAY);
-    if close_resp.clicked() {
-        result.close_clicked = true;
-    }
-
-    // --- Layout Inside Capsule ---
-    
-    // Left: Settings
-    let settings_center = capsule_rect.left_center() + Vec2::new(28.0, 0.0);
-    let settings_rect = Rect::from_center_size(settings_center, Vec2::new(28.0, 28.0));
-    let settings_resp = ui.interact(settings_rect, ui.id().with("settings_btn"), Sense::click());
-    
-    let settings_color = if settings_resp.hovered() || settings_open { 
-        Color32::from_rgb(205, 132, 255) 
-    } else { 
-        Color32::GRAY 
-    };
-    
-    painter.circle_stroke(settings_center, 7.0, Stroke::new(1.5, settings_color));
-    painter.circle_stroke(settings_center, 2.5, Stroke::new(1.5, settings_color));
-
-    if settings_resp.clicked() {
-        result.toggle_settings = true;
-    }
-
-    // Middle Divider
-    let div_x = capsule_rect.center().x;
-    painter.line_segment(
-        [Pos2::new(div_x, capsule_rect.min.y + 12.0), Pos2::new(div_x, capsule_rect.max.y - 12.0)],
-        Stroke::new(1.0, Color32::from_rgb(75, 85, 99)),
-    );
-
-    // Right: Mic
-    let mic_center = capsule_rect.right_center() - Vec2::new(32.0, 0.0);
-    draw_mic_and_waves(ui, mic_center, capsule_rect, status, icon_scale * 1.2, wave_scale1, wave_scale2);
-
-    // Status / Model Text (below capsule)
-    let status_text = match status {
-        AppStatus::Idle => selected_model.display_name(),
-        AppStatus::Recording => "Listening...",
-        AppStatus::Transcribing => "Processing...",
-    };
-    painter.text(
-        Pos2::new(capsule_rect.center().x, capsule_rect.bottom() + 12.0),
-        Align2::CENTER_CENTER,
-        status_text,
-        FontId::proportional(11.0),
-        Color32::from_rgba_unmultiplied(200, 200, 200, 180),
-    );
-
-    // Settings Dropdown
-    if settings_open {
-        result.selected_model = draw_settings_dropdown(ui, settings_rect, selected_model);
-    }
-
-    result
-}
-
-fn draw_mic_and_waves(
-    ui: &egui::Ui,
-    center: Pos2,
-    clip_rect: Rect,
-    status: AppStatus,
-    icon_scale: f32,
-    scale1: f32,
-    scale2: f32,
-) {
-    let painter = ui.painter().with_clip_rect(clip_rect);
-    let mic_color = if status == AppStatus::Recording { 
-        Color32::from_rgb(56, 189, 248) 
-    } else { 
-        Color32::GRAY 
-    };
-
-    // Waves
-    let base_wave_radius = 12.0;
-    if scale2 > 0.6 {
-        let opacity = (0.6 - (scale2 / 10.0)).clamp(0.0, 1.0) * 200.0;
-        painter.circle_stroke(center, base_wave_radius * scale2, Stroke::new(1.5, Color32::from_rgba_unmultiplied(56, 189, 248, opacity as u8)));
-    }
-    if scale1 > 0.6 {
-        let opacity = (1.0 - (scale1 / 8.0)).clamp(0.0, 1.0) * 200.0;
-        painter.circle_stroke(center, base_wave_radius * scale1, Stroke::new(1.5, Color32::from_rgba_unmultiplied(56, 189, 248, opacity as u8)));
-    }
-
-    // Mic Icon
-    let s = icon_scale;
-    painter.rect_stroke(
-        Rect::from_center_size(center - Vec2::new(0.0, 2.0 * s), Vec2::new(5.0 * s, 10.0 * s)),
-        Rounding::same(2.5 * s),
-        Stroke::new(1.8, mic_color)
-    );
-    painter.line_segment(
-        [center + Vec2::new(-5.0 * s, 0.0), center + Vec2::new(-5.0 * s, 3.5 * s)],
-        Stroke::new(1.8, mic_color)
-    );
-    painter.line_segment(
-        [center + Vec2::new(5.0 * s, 0.0), center + Vec2::new(5.0 * s, 3.5 * s)],
-        Stroke::new(1.8, mic_color)
-    );
-    painter.line_segment(
-        [center + Vec2::new(-5.0 * s, 3.5 * s), center + Vec2::new(5.0 * s, 3.5 * s)],
-        Stroke::new(1.8, mic_color)
-    );
-    painter.line_segment(
-        [center + Vec2::new(0.0, 3.5 * s), center + Vec2::new(0.0, 7.0 * s)],
-        Stroke::new(1.8, mic_color)
-    );
-}
-
-fn draw_settings_dropdown(
-    ui: &mut egui::Ui,
-    anchor_rect: Rect,
-    selected_model: SpeechModel,
-) -> Option<SpeechModel> {
-    let mut new_model = None;
-    let window_id = ui.id().with("settings_popup");
-    
-    egui::Area::new(window_id)
-        .order(egui::Order::Foreground)
-        .fixed_pos(anchor_rect.left_bottom() + Vec2::new(0.0, 4.0))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style())
-                .fill(Color32::from_rgb(31, 41, 55))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(75, 85, 99)))
-                .rounding(Rounding::same(8.0))
-                .show(ui, |ui| {
-                    ui.set_min_width(120.0);
-                    
-                    let models = [
-                        (SpeechModel::GroqWhisper, "Groq Whisper"),
-                        (SpeechModel::Telephony, "Telephony"),
-                        (SpeechModel::Chirp3, "Chirp 3"),
-                    ];
-                    
-                    for (m, label) in models {
-                        let is_selected = m.settings_choice() == selected_model.settings_choice();
-                        let text_color = if is_selected { Color32::from_rgb(205, 132, 255) } else { Color32::WHITE };
-                        
-                        if ui.selectable_label(is_selected, RichText::new(label).color(text_color)).clicked() {
-                            new_model = Some(m);
-                        }
-                    }
-                });
-        });
-        
-    new_model
-}
 
 
 pub fn apply_no_taskbar_style() -> bool {
@@ -417,6 +355,15 @@ pub fn persist_selected_speech_model(model: SpeechModel) {
         eprintln!(
             "Warning: failed to save speech model to {}: {}",
             SPEECH_MODEL_SETTINGS_FILE, e
+        );
+    }
+}
+
+pub fn persist_selected_language(lang: &str) {
+    if let Err(e) = fs::write("voca-language.txt", format!("{}\n", lang)) {
+        eprintln!(
+            "Warning: failed to save language to voca-language.txt: {}",
+            e
         );
     }
 }

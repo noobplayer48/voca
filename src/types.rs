@@ -1,4 +1,4 @@
-use crate::api::SpeechModel;
+
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum AppStatus {
@@ -11,6 +11,7 @@ pub enum AppStatus {
 pub enum TriggerEvent {
     Transcribe,
     Translate,
+    Ocr,
 }
 
 pub enum TranscriptionEventKind {
@@ -24,9 +25,4 @@ pub struct TranscriptionEvent {
     pub kind: TranscriptionEventKind,
 }
 
-pub struct PendingFallback {
-    pub session_id: u64,
-    pub wav_bytes: Vec<u8>,
-    pub speech_model: SpeechModel,
-    pub is_translation: bool,
-}
+

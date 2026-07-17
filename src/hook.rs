@@ -33,6 +33,17 @@ unsafe extern "system" fn hook_callback(ncode: i32, wparam: WPARAM, lparam: LPAR
                 Some(TriggerEvent::Transcribe)
             } else if kb_struct.vkCode == VK_F12.0 as u32 {
                 Some(TriggerEvent::Translate)
+            } else if kb_struct.vkCode == 0x54 { // 'T' key
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
+                let win_down = unsafe {
+                    (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0
+                        || (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0
+                };
+                if win_down {
+                    Some(TriggerEvent::Ocr)
+                } else {
+                    None
+                }
             } else {
                 None
             };

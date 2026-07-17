@@ -5,3 +5,6 @@ models/
 node_modules/
 .DS_Store/
 voca-speech-model.txt
+voca-groq-api-key.txt
+voca-language.txt
+archive/

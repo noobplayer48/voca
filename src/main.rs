@@ -7,15 +7,16 @@ mod types;
 mod logic;
 mod ui;
 mod utils;
+mod ocr;
+
+pub static EGUI_CONTEXT: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
 
 use crate::api::SpeechModel;
 use crate::types::AppStatus;
 use crate::ui::DictationIndicatorWrapper;
-use dotenv::dotenv;
+
 use eframe::egui;
 use image::GenericImageView;
-use std::env;
-use std::fs;
 use std::sync::{
     atomic::AtomicU32,
     mpsc,
@@ -36,36 +37,18 @@ pub const SPEECH_MODEL_SETTINGS_FILE: &str = "voca-speech-model.txt";
 pub const DEFAULT_ASIA_SPEECH_REGION: &str = "asia-southeast1";
 
 fn main() -> Result<(), eframe::Error> {
-    dotenv().ok();
-    
-    let gcp_project_id = match env::var("GCP_PROJECT_ID") {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("Error: GCP_PROJECT_ID environment variable is not set.");
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            return Ok(());
-        }
-    };
-
-    if env::var("GROQ_API_KEY").is_err() {
-        eprintln!("Warning: GROQ_API_KEY is not set. Groq Whisper features will be unavailable.");
-    }
     let speech_model = load_selected_speech_model();
-    let speech_region = env::var("GCP_SPEECH_REGION")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ASIA_SPEECH_REGION.to_string());
+    let selected_language = load_selected_language();
 
     println!("========================================");
     println!("Voca Dictation Service Running!      ");
     println!("Press F11 to toggle dictation ON/OFF.   ");
     println!("Speech model: {}", speech_model.display_name());
-    println!("Speech transport: bidirectional gRPC streaming");
-    println!("Speech region: {}", speech_region);
     println!("========================================\n");
 
     let status = Arc::new(RwLock::new(AppStatus::Idle));
     let speech_model_state = Arc::new(RwLock::new(speech_model));
+    let language_state = Arc::new(RwLock::new(selected_language.clone()));
     let audio_level = Arc::new(AtomicU32::new(0));
 
     use crate::types::TriggerEvent;
@@ -78,15 +61,20 @@ fn main() -> Result<(), eframe::Error> {
         }
     });
 
+    let ocr_triggered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let language_toast: Arc<std::sync::RwLock<Option<(String, std::time::Instant)>>> =
+        Arc::new(std::sync::RwLock::new(None));
+
     // 2. Start dictation logic thread.
     logic::start_logic_thread(
         rx,
         tx.clone(),
         status.clone(),
         speech_model_state.clone(),
+        language_state.clone(),
         audio_level.clone(),
-        gcp_project_id,
-        speech_region,
+        ocr_triggered.clone(),
+        language_toast.clone(),
     );
 
     // Remove the separate VAD thread — VAD is now inside AudioRecorder.
@@ -112,8 +100,6 @@ fn main() -> Result<(), eframe::Error> {
     
     let models_to_show = vec![
         SpeechModel::GroqWhisper,
-        SpeechModel::Telephony,
-        SpeechModel::Chirp3,
     ];
 
     let mut tray_models = Vec::new();
@@ -126,6 +112,18 @@ fn main() -> Result<(), eframe::Error> {
 
     let _ = tray_menu.append(&tray_icon::menu::PredefinedMenuItem::separator());
 
+    // Language selection items
+    let lang_hi_item = tray_icon::menu::CheckMenuItem::new("Hindi (hi)", true, selected_language == "hi", None);
+    let lang_en_item = tray_icon::menu::CheckMenuItem::new("English (en)", true, selected_language == "en", None);
+    let _ = tray_menu.append(&lang_hi_item);
+    let _ = tray_menu.append(&lang_en_item);
+
+    let _ = tray_menu.append(&tray_icon::menu::PredefinedMenuItem::separator());
+
+    let settings_i = tray_icon::menu::MenuItem::new("Settings", true, None);
+    let tray_settings_id = settings_i.id().clone();
+    let _ = tray_menu.append(&settings_i);
+    
     let quit_i = tray_icon::menu::MenuItem::new("Quit Voca", true, None);
     let tray_quit_id = quit_i.id().clone();
     let _ = tray_menu.append(&quit_i);
@@ -141,9 +139,12 @@ fn main() -> Result<(), eframe::Error> {
         WINDOW_TITLE,
         options,
         Box::new(move |_cc| {
+            let ocr_triggered_captured = ocr_triggered.clone();
+            let (ocr_tx, ocr_rx) = std::sync::mpsc::channel();
             Box::new(DictationIndicatorWrapper {
                 status: status.clone(),
                 speech_model: speech_model_state.clone(),
+                language: language_state.clone(),
                 audio_level: audio_level.clone(),
                 was_visible: false,
                 style_applied: false,
@@ -151,37 +152,36 @@ fn main() -> Result<(), eframe::Error> {
                 settings_open: false,
                 _tray_icon: tray_icon,
                 tray_models,
+                tray_lang_hi: lang_hi_item,
+                tray_lang_en: lang_en_item,
                 tray_quit_id,
+                tray_settings_id,
                 trigger_tx: tx.clone(),
-                icon_scale: 1.0,
-                wave_scale1: 0.5,
-                wave_scale2: 0.5,
+                twinkle_vad_state: ui::audio_bars_ui::TwinkleVadState::default(),
+                show_settings_window: false,
+                groq_api_key_input: std::fs::read_to_string("voca-groq-api-key.txt").unwrap_or_default().trim().to_string(),
+                ocr_triggered: ocr_triggered_captured,
+                ocr_state: crate::ocr::OcrState::default(),
+                ocr_tx,
+                ocr_rx,
+                language_toast: language_toast.clone(),
             })
         }),
     )
 }
 
 fn load_selected_speech_model() -> SpeechModel {
-    if let Ok(saved_value) = fs::read_to_string(SPEECH_MODEL_SETTINGS_FILE) {
-        match SpeechModel::parse(&saved_value) {
-            Ok(model) => return model.settings_choice(),
-            Err(e) => eprintln!(
-                "Warning: failed to parse {}: {}. Falling back to environment/default.",
-                SPEECH_MODEL_SETTINGS_FILE, e
-            ),
+    SpeechModel::GroqWhisper
+}
+
+fn load_selected_language() -> String {
+    if let Ok(lang) = std::fs::read_to_string("voca-language.txt") {
+        let lang = lang.trim().to_ascii_lowercase();
+        if lang == "en" {
+            return "en".to_string();
         }
     }
-
-    match env::var("GCP_SPEECH_MODEL") {
-        Ok(value) => match SpeechModel::parse(&value) {
-            Ok(model) => model.settings_choice(),
-            Err(e) => {
-                eprintln!("Warning: {}. Falling back to Groq Whisper.", e);
-                SpeechModel::default()
-            }
-        },
-        Err(_) => SpeechModel::default(),
-    }
+    "hi".to_string()
 }
 
 pub fn indicator_hwnd() -> Option<HWND> {

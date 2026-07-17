@@ -12,7 +12,7 @@ use earshot::Detector;
 const STREAM_CHUNK_DURATION: Duration = Duration::from_millis(100);
 const VAD_SAMPLE_RATE: u32 = 16_000;
 const VAD_FRAME_SIZE: usize = 256;
-const VAD_THRESHOLD: f32 = 0.4;
+const VAD_THRESHOLD: f32 = 0.5;
 const SILENCE_THRESHOLD_FRAMES: u32 = 125; // 2 seconds at 16k/256
 
 struct LiveStreamSink {
@@ -40,7 +40,10 @@ struct VadState {
     buffer: Vec<i16>,
     trigger_tx: mpsc::Sender<TriggerEvent>,
     active: bool,
-    downsample_ratio: u32,
+    input_sample_rate: u32,
+    resample_buffer: Vec<i16>,
+    resample_accumulator: f64,
+    smoothed_score: f32,
 }
 
 pub struct AudioRecorder {
@@ -73,7 +76,10 @@ impl AudioRecorder {
             buffer: Vec::with_capacity(VAD_FRAME_SIZE),
             trigger_tx,
             active: false,
-            downsample_ratio: 1,
+            input_sample_rate: VAD_SAMPLE_RATE,
+            resample_buffer: Vec::new(),
+            resample_accumulator: 0.0,
+            smoothed_score: 0.0,
         })));
     }
 
@@ -128,9 +134,6 @@ impl AudioRecorder {
         });
 
         let buf_clone = self.buffer.clone();
-        let level_f32 = self.input_level.clone();
-        let level_i16 = self.input_level.clone();
-        let level_u16 = self.input_level.clone();
         let stream_sink_f32 = self.live_stream_sink.clone();
         let stream_sink_i16 = self.live_stream_sink.clone();
         let stream_sink_u16 = self.live_stream_sink.clone();
@@ -144,14 +147,16 @@ impl AudioRecorder {
                 guard.silence_frames = 0;
                 guard.buffer.clear();
                 guard.detector = Detector::default(); // Ensure fresh state for each recording session
-                guard.active = sample_rate >= VAD_SAMPLE_RATE; // Support anything above 16k
-                guard.downsample_ratio = (sample_rate as f32 / VAD_SAMPLE_RATE as f32).round() as u32;
+                guard.active = sample_rate >= 8000; // Support any input sample rate >= 8kHz
+                guard.input_sample_rate = sample_rate;
+                guard.resample_buffer.clear();
+                guard.resample_accumulator = 0.0;
+                guard.smoothed_score = 0.0;
                 
-                if !guard.active || guard.downsample_ratio == 0 {
-                    guard.active = false;
+                if !guard.active {
                     eprintln!("Warning: VAD disabled because sample rate is too low: {} Hz", sample_rate);
-                } else if guard.downsample_ratio > 1 {
-                    println!("[*] VAD: Using {}:1 downsampler for {} Hz input", guard.downsample_ratio, sample_rate);
+                } else if sample_rate != VAD_SAMPLE_RATE {
+                    println!("[*] VAD: Using stateful linear resampler from {} Hz to {} Hz", sample_rate, VAD_SAMPLE_RATE);
                 }
             }
         }
@@ -171,7 +176,6 @@ impl AudioRecorder {
                         data,
                         channels,
                         &buf_clone,
-                        &level_f32,
                         stream_sink_f32.as_ref(),
                         vad_state_f32.as_ref(),
                     )
@@ -186,7 +190,6 @@ impl AudioRecorder {
                         data,
                         channels,
                         &buf_clone,
-                        &level_i16,
                         stream_sink_i16.as_ref(),
                         vad_state_i16.as_ref(),
                     )
@@ -201,7 +204,6 @@ impl AudioRecorder {
                         data,
                         channels,
                         &buf_clone,
-                        &level_u16,
                         stream_sink_u16.as_ref(),
                         vad_state_u16.as_ref(),
                     )
@@ -215,6 +217,10 @@ impl AudioRecorder {
         stream.play()?;
         self.stream = Some(stream);
         Ok(())
+    }
+
+    pub fn get_vad_score(&self) -> f32 {
+        self.vad_state.as_ref().map(|vs| vs.lock().map(|s| s.smoothed_score).unwrap_or(0.0)).unwrap_or(0.0)
     }
 
     pub fn set_preferred_sample_rate_hz(&mut self, preferred_sample_rate_hz: u32) {
@@ -260,7 +266,6 @@ fn write_input_data<T>(
     input: &[T],
     channels: u16,
     writer: &Arc<Mutex<Vec<i16>>>,
-    input_level: &Arc<AtomicU32>,
     live_stream_sink: Option<&Arc<Mutex<LiveStreamSink>>>,
     vad_state: Option<&Arc<Mutex<VadState>>>,
 )
@@ -270,7 +275,6 @@ where
     i32: cpal::FromSample<T>,
 {
     let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-    let mut peak: u16 = 0;
     let host_channels = channels as usize;
     let mut mono_samples = Vec::with_capacity(input.len() / host_channels + 1);
     let mut i = 0;
@@ -281,7 +285,6 @@ where
         
         guard.push(mono_sample_i16);
         mono_samples.push(mono_sample_i16);
-        peak = peak.max(mono_sample_i16.unsigned_abs());
         i += host_channels;
     }
     drop(guard);
@@ -293,16 +296,6 @@ where
     if let Some(vs) = vad_state {
         process_vad(vs, &mono_samples);
     }
-
-    let instant_level = peak as f32 / i16::MAX as f32;
-    let prev = input_level.load(Ordering::Relaxed) as f32 / 1000.0;
-    let smoothed = if instant_level > prev {
-        prev * 0.35 + instant_level * 0.65
-    } else {
-        prev * 0.90 + instant_level * 0.10
-    };
-    let scaled = (smoothed.clamp(0.0, 1.0) * 1000.0) as u32;
-    input_level.store(scaled, Ordering::Relaxed);
 }
 
 fn push_live_stream_samples(live_stream_sink: &Arc<Mutex<LiveStreamSink>>, samples: &[i16]) {
@@ -352,18 +345,51 @@ fn process_vad(vad_state: &Arc<Mutex<VadState>>, samples: &[i16]) {
         return;
     }
 
-    let ratio = guard.downsample_ratio;
-    for (i, &sample) in samples.iter().enumerate() {
-        if i as u32 % ratio == 0 {
-            guard.buffer.push(sample);
-        }
+    // Append new samples to the resample buffer
+    guard.resample_buffer.extend_from_slice(samples);
+
+    let dt = guard.input_sample_rate as f64 / VAD_SAMPLE_RATE as f64;
+
+    // Linearly interpolate and push to the VAD frame buffer
+    while guard.resample_accumulator + 1.0 < guard.resample_buffer.len() as f64 {
+        let idx = guard.resample_accumulator.floor() as usize;
+        let frac = guard.resample_accumulator - idx as f64;
+        
+        let s0 = guard.resample_buffer[idx] as f64;
+        let s1 = guard.resample_buffer[idx + 1] as f64;
+        let interpolated = (s0 + frac * (s1 - s0)) as i16;
+        
+        guard.buffer.push(interpolated);
+        guard.resample_accumulator += dt;
     }
 
+    // Drain processed samples from the resample buffer
+    let idx_to_remove = guard.resample_accumulator.floor() as usize;
+    if idx_to_remove > 0 {
+        guard.resample_buffer.drain(..idx_to_remove);
+        guard.resample_accumulator -= idx_to_remove as f64;
+    }
+
+    // Process complete frames of size 256
     while guard.buffer.len() >= VAD_FRAME_SIZE {
-        let frame: Vec<i16> = guard.buffer.drain(..VAD_FRAME_SIZE).collect();
+        let mut frame: Vec<i16> = guard.buffer.drain(..VAD_FRAME_SIZE).collect();
+        let max_abs = frame.iter().map(|&x| x.unsigned_abs()).max().unwrap_or(0);
+        
+        // Noise gate: if peak amplitude is below 1000, zero out the frame.
+        // This decays the GRU network state to silence.
+        if max_abs < 1000 {
+            frame.fill(0);
+        }
+        
         let score = guard.detector.predict_i16(&frame);
 
-        if score >= VAD_THRESHOLD {
+        // Exponential moving average to smooth VAD scores
+        let alpha = 0.85;
+        guard.smoothed_score = alpha * guard.smoothed_score + (1.0 - alpha) * score;
+
+
+
+        if guard.smoothed_score >= VAD_THRESHOLD {
             guard.silence_frames = 0;
         } else {
             if guard.active {
